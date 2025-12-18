@@ -14,7 +14,7 @@
     Each row in the dataset represents a single function evaluation. It consists of:
     *   **Function ID:** Unique identifier (1–8).
     *   **Round:** The iteration number (0 for initial data, 1–10 for weekly submissions).
-    *   **Inputs ($X_1 \dots X_8$):** The coordinates queried within the search space $[6]^d$.
+    *   **Inputs ($X_1 \dots X_8$):** The coordinates queried within the search space.
     *   **Output ($Y$):** The scalar score returned by the black-box function.
 
 *   **How many instances are there?**
@@ -32,7 +32,7 @@
 *   **Are there any known errors, sources of noise, or redundancies?**
     *  **Noise:** The objective functions exhibit **observational noise** (stochastically). Repeated evaluations or evaluations in close proximity display variance that cannot be explained by smooth mathematical functions alone.
     *  **Mitigation:** This noise required the introduction of a **WhiteKernel** (noise_level=0.1) in the Gaussian Process model to distinguish between signal and variance.
-    *  **Context:** This project interacts with the functions via **continuous numerical inputs. Therefore, the noise is treated mathematically as aleatoric uncertainty rather than prompt instability.
+    *  **Context:** This project interacts with the functions via continuous numerical inputs. Therefore, the noise is treated mathematically as aleatoric uncertainty rather than prompt instability.
 
 ## 3. Collection Process
 
