@@ -1,0 +1,178 @@
+```python
+import pandas as pd
+import numpy as np
+import json
+import logging
+import os
+```
+
+
+```python
+# Set up logging for cleaner output during execution
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+```
+
+
+```python
+# --- Configuration ---
+# Input: Master file from the previous week (Week 3)
+BASE_DATA_PATH = 'bbo_master_w03.csv' 
+
+# The directory containing the new data files
+ADD_DATA_PATH = 'add_data'
+
+# Input: JSON files containing the new query results (Week 3 data)
+# NOTE: Using os.path.join to correctly reference files inside the 'add_data' folder
+X_INPUT_FILE = os.path.join(ADD_DATA_PATH, 'week03_clean_inputs.json')
+Y_OUTPUT_FILE = os.path.join(ADD_DATA_PATH, 'week03_clean_outputs.json')
+
+# Output: The final master file containing all data points (W0, W1, W2, W3)
+OUTPUT_FILE_NAME = 'bbo_master_w04.csv'
+
+# Column names used in the CSV files
+FUNCTION_ID_COL = 'Function ID'
+Y_COLUMN = 'Y'
+# Note: The number of X columns must match the maximum dimension (8)
+X_COLUMNS = [f'X{i}' for i in range(1, 9)]
+
+# Expected size checks (for verification)
+EXPECTED_NEW_ROWS = 8
+# 80 Initial + 8 W1 + 8 W2 = 96
+EXPECTED_INITIAL_ROWS = 96 
+# 96 + 8 W3 = 104
+EXPECTED_FINAL_ROWS = EXPECTED_INITIAL_ROWS + EXPECTED_NEW_ROWS 
+```
+
+
+```python
+def load_json_data(file_path):
+    """Loads data from a JSON file."""
+    try:
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+        return data
+    except FileNotFoundError:
+        logging.error(f"Error: JSON file not found at {file_path}. Please ensure it is in the correct directory.")
+        return None
+    except json.JSONDecodeError:
+        logging.error(f"Error: Invalid JSON format in {file_path}.")
+        return None
+```
+
+
+```python
+def create_query_df(inputs, outputs):
+    """
+    Converts the list of lists (inputs) and list of floats (outputs)
+    into a structured DataFrame, ensuring all dimensions are present and correctly mapped
+    to the 8 functions (F1-F8).
+    """
+    if len(inputs) != EXPECTED_NEW_ROWS or len(outputs) != EXPECTED_NEW_ROWS:
+        logging.error(f"Input/Output count mismatch. Expected {EXPECTED_NEW_ROWS} pairs.")
+        return None
+
+    # 1. Prepare data structure for 8 functions and 8 max dimensions
+    data = {col: [np.nan] * EXPECTED_NEW_ROWS for col in X_COLUMNS}
+    # Function IDs 1 to 8 correspond to the 8 data points in the list
+    data[FUNCTION_ID_COL] = list(range(1, EXPECTED_NEW_ROWS + 1)) 
+    data[Y_COLUMN] = outputs
+
+    # 2. Map variable-length input vectors to the X1-X8 columns
+    for i, x_vec in enumerate(inputs):
+        for j, val in enumerate(x_vec):
+            # j is the dimension index (0 to N-1), so map to X_COLUMNS[j]
+            data[X_COLUMNS[j]][i] = val
+
+    # 3. Create DataFrame
+    df = pd.DataFrame(data)
+    df[FUNCTION_ID_COL] = df[FUNCTION_ID_COL].astype(int)
+    
+    # Reorder columns to match the standard format: Function ID, X1..X8, Y
+    all_cols = [FUNCTION_ID_COL] + X_COLUMNS + [Y_COLUMN]
+    return df[all_cols]
+```
+
+
+```python
+def create_bbo_master_w04():
+    """Main function to load, append, and save the master BBO dataset."""
+    logging.info(f"--- Loading initial data from {BASE_DATA_PATH} (Expected {EXPECTED_INITIAL_ROWS} rows) ---")
+    
+    # --- 1. Load existing master data ---
+    try:
+        master_df = pd.read_csv(BASE_DATA_PATH)
+        initial_rows = len(master_df)
+        logging.info(f"Initial data points loaded: {initial_rows}.")
+        if initial_rows != EXPECTED_INITIAL_ROWS:
+            logging.warning(f"Warning: Loaded {initial_rows} rows, expected {EXPECTED_INITIAL_ROWS}. Continuing anyway.")
+    except FileNotFoundError:
+        logging.error(f"Base file not found at {BASE_DATA_PATH}. Cannot proceed.")
+        return
+    except pd.errors.EmptyDataError:
+        logging.error("Base file is empty. Cannot proceed.")
+        return
+    
+    # --- 2. Load and validate new query data ---
+    query_inputs = load_json_data(X_INPUT_FILE)
+    query_outputs = load_json_data(Y_OUTPUT_FILE)
+    
+    if query_inputs is None or query_outputs is None:
+        logging.error("Failed to load new query JSON files. Master file not created.")
+        return
+        
+    if len(query_inputs) != EXPECTED_NEW_ROWS or len(query_outputs) != EXPECTED_NEW_ROWS:
+        logging.error(f"Loaded {len(query_inputs)} inputs and {len(query_outputs)} outputs," +
+                      "expected {EXPECTED_NEW_ROWS} of each. Master file not created.")
+        return
+        
+    logging.info(f"Successfully loaded {EXPECTED_NEW_ROWS} new Week 3 query points from '{ADD_DATA_PATH}' (F1-F8).")
+    
+    # --- 3. Create the DataFrame for the new query data ---
+    # Added try/except to prevent NameError if an unhandled exception occurs during assignment
+    try:
+        query_df = create_query_df(query_inputs, query_outputs)
+    except Exception as e:
+        logging.error(f"Critical error creating query DataFrame: {e}. Cannot proceed.")
+        return
+
+    if query_df is None:
+        logging.error("Error creating query DataFrame. Master file not created.")
+        return
+    
+    # --- 4. Concatenate and save ---
+    # Stack the new query data below the existing master data
+    new_master_df = pd.concat([master_df, query_df], ignore_index=True)
+    
+    # Save the final file, using an empty string for NaN values in the output CSV
+    new_master_df.to_csv(OUTPUT_FILE_NAME, index=False, na_rep='')
+    
+    # --- 5. Final Verification ---
+    final_rows = len(new_master_df)
+    logging.info("INFO: ---------------------------------------------")
+    logging.info(f"SUCCESS: New master data file '{OUTPUT_FILE_NAME}' created.")
+    logging.info(f"Total rows in the new file: {final_rows} (Expected {EXPECTED_FINAL_ROWS}).")
+    logging.info(f"Verification: There are now {final_rows // 8} data points for each of the 8 functions.")
+    logging.info("INFO: ---------------------------------------------")
+```
+
+
+```python
+if __name__ == '__main__':
+    create_bbo_master_w04()
+```
+
+    INFO: --- Loading initial data from bbo_master_w03.csv (Expected 96 rows) ---
+    INFO: Initial data points loaded: 96.
+    INFO: Successfully loaded 8 new Week 3 query points from 'add_data' (F1-F8).
+    INFO: INFO: ---------------------------------------------
+    INFO: SUCCESS: New master data file 'bbo_master_w04.csv' created.
+    INFO: Total rows in the new file: 104 (Expected 104).
+    INFO: Verification: There are now 13 data points for each of the 8 functions.
+    INFO: INFO: ---------------------------------------------
+
+
+
+```python
+
+```

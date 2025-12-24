@@ -1,0 +1,240 @@
+```python
+import pandas as pd
+import numpy as np
+import json
+import os
+import logging
+import sys
+
+# Set up logging for console output
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s', stream=sys.stdout)
+
+
+# --- Configuration for Week 9 (Aggregating Round 8 Data) ---
+# Previous master file (contains data up to Round 7)
+MASTER_FILE_PATH_OLD = 'bbo_master_w08.csv'
+# New master file for Week 09 (will contain data up to Round 8: 18 data points total)
+MASTER_FILE_PATH_NEW = 'bbo_master_w09.csv'
+ADD_DATA_DIR = 'add_data'
+
+# Files for the new data point (Round 8 data)
+# NOTE: Assumes 'week08_clean_inputs.json' and 'week08_clean_outputs.json' are in 'add_data'
+INPUTS_FILE = 'week08_clean_inputs.json' 
+OUTPUTS_FILE = 'week08_clean_outputs.json' 
+
+NUM_FUNCTIONS = 8
+# The next round of data to be appended is Round 8.
+CURRENT_ROUND = 8
+
+# --- CRITICAL: Function dimensionality mapping ---
+FUNCTION_DIMS = {
+    1: 2, # F1: 2D
+    2: 2, # F2: 2D
+    3: 3, # F3: 3D
+    4: 4, # F4: 4D
+    5: 4, # F5: 4D
+    6: 5, # F6: 5D
+    7: 6, # F7: 6D
+    8: 8  # F8: 8D
+}
+
+def load_json_file(file_path):
+    """Loads a JSON file or returns None with a warning."""
+    full_path = os.path.join(ADD_DATA_DIR, file_path)
+    if not os.path.exists(full_path):
+        logging.error(f"ERROR: Required file '{full_path}' not found. Please ensure it is in the '{ADD_DATA_DIR}' folder.")
+        return None
+    try:
+        with open(full_path, 'r') as f:
+            data = json.load(f)
+            logging.info(f"Successfully loaded {file_path}.")
+            return data
+    except json.JSONDecodeError:
+        logging.error(f"ERROR: Could not decode JSON from '{file_path}'. Check file format (must be valid JSON).")
+        return None
+    except Exception as e:
+        logging.error(f"An unexpected error occurred loading {file_path}: {e}")
+        return None
+
+
+def create_master_data():
+    logging.info("*"*50)
+    logging.info(f"--- Starting BBO Master File Creation for Round {CURRENT_ROUND} ---")
+
+    # 1. Load the previous master file
+    if not os.path.exists(MASTER_FILE_PATH_OLD):
+        logging.error(f"Master file '{MASTER_FILE_PATH_OLD}' not found. Cannot proceed with aggregation.")
+        return None
+
+    try:
+        df_master_old = pd.read_csv(MASTER_FILE_PATH_OLD)
+        logging.info(f"Loaded {len(df_master_old)} rows from {MASTER_FILE_PATH_OLD}.")
+
+        # FIX: Ensure the 'Round' column exists and is positioned correctly
+        num_rounds_after_r0 = (len(df_master_old) - 80) // 8
+        round_list = [0] * 80 # Initial 80 rows are Round 0
+        for r in range(1, num_rounds_after_r0 + 1):
+            round_list.extend([r] * 8)
+
+        if len(round_list) == len(df_master_old):
+            if 'Round' in df_master_old.columns:
+                df_master_old['Round'] = round_list
+            else:
+                df_master_old.insert(1, 'Round', round_list)
+            logging.info(f"FIX APPLIED: 'Round' column corrected (R0 to R{num_rounds_after_r0}).")
+        else:
+            logging.warning(f"Could not reliably infer 'Round' numbers (length mismatch: {len(round_list)} vs {len(df_master_old)}). Skipping round correction.")
+
+    except Exception as e:
+        logging.error(f"Failed to read or process master CSV: {e}")
+        return None
+
+    # 2. Load the new inputs and outputs
+    inputs_list = load_json_file(INPUTS_FILE)
+    outputs_array = load_json_file(OUTPUTS_FILE)
+
+    if inputs_list is None or outputs_array is None:
+        logging.error("Aggregation aborted due to missing or invalid JSON files.")
+        return None
+
+    # --- CRITICAL INPUT VALIDATION STEP ---
+    if not isinstance(inputs_list, list) or len(inputs_list) != NUM_FUNCTIONS:
+        logging.critical(f"FATAL ERROR: Input file '{INPUTS_FILE}' is invalid or has an incorrect number of entries.")
+        logging.critical(f"Expected a list of {NUM_FUNCTIONS} entries (one list of coordinates per function).")
+        logging.critical("Aggregation aborted.")
+        return None
+
+    if not isinstance(outputs_array, list) or len(outputs_array) != NUM_FUNCTIONS:
+        logging.critical(f"FATAL ERROR: Output file '{OUTPUTS_FILE}' is invalid or has an incorrect number of entries.")
+        logging.critical(f"Expected a list of {NUM_FUNCTIONS} entries (one score per function).")
+        logging.critical("Aggregation aborted.")
+        return None
+
+    # Define the columns for the new DataFrame (must match the old one)
+    cols_to_use = df_master_old.columns.tolist()
+
+    # 3. Construct the new 8 rows (one for each function)
+    new_data = []
+
+    for i in range(NUM_FUNCTIONS):
+        f_id = i + 1
+        dim = FUNCTION_DIMS[f_id]
+        f_name = f'f{f_id}'
+
+        # Safety check for input structure
+        x_values_raw = inputs_list[i] if i < len(inputs_list) and isinstance(inputs_list[i], list) else []
+        score = outputs_array[i] if i < len(outputs_array) else np.nan
+
+        # Validation and Padding
+        if len(x_values_raw) != dim:
+            # Logic: truncate or pad coordinates to the required dimension (dim)
+            if len(x_values_raw) > dim:
+                logging.warning(f"Input dimension mismatch for {f_name}. Expected {dim}, found {len(x_values_raw)}. TRUNCATING inputs.")
+                x_values_to_use = x_values_raw[:dim]
+            elif len(x_values_raw) < dim:
+                logging.warning(f"Input dimension mismatch for {f_name}. Expected {dim}, found {len(x_values_raw)}. PADDING inputs with 0.5.")
+                # If the input list is too short, pad with the centre point (0.5)
+                x_values_to_use = x_values_raw + [0.5] * (dim - len(x_values_raw))
+            else:
+                x_values_to_use = x_values_raw # Should be unreachable if the check failed, but included for completeness
+
+            # Fill the row with NaNs for X-columns beyond 'dim' (up to 8D)
+            x_values = x_values_to_use + [np.nan] * (8 - dim)
+        else:
+            # Inputs are perfect, pad with NaNs up to 8D
+            x_values = x_values_raw + [np.nan] * (8 - dim)
+
+        # Create the new row dictionary
+        row_data = {
+            'Function ID': f_id,
+            'Y': score,
+            'Round': CURRENT_ROUND
+        }
+
+        # Add the X-coordinates
+        for d in range(8):
+            row_data[f'X{d+1}'] = x_values[d]
+
+        new_data.append(row_data)
+
+    # Create new DataFrame and ensure column order is preserved
+    df_new_rows = pd.DataFrame(new_data, columns=cols_to_use)
+    logging.info(f"Successfully constructed {len(df_new_rows)} new rows (Round {CURRENT_ROUND}).")
+
+    # 4. Concatenate and Save
+    df_master_new = pd.concat([df_master_old, df_new_rows], ignore_index=True)
+    df_master_new.to_csv(MASTER_FILE_PATH_NEW, index=False)
+
+    # 5. Verification
+    total_rows = len(df_master_new)
+    expected_rows = len(df_master_old) + NUM_FUNCTIONS
+    
+    logging.info("\n" + "*"*50)
+    logging.info(f"SUCCESS: New master data file '{MASTER_FILE_PATH_NEW}' created.")
+    logging.info(f"Total rows in the new file: {total_rows} (Expected {expected_rows}).")
+    logging.info(f"Verification: There are now {total_rows / 8:.0f} data points (Rounds 0-{CURRENT_ROUND}) for each of the 8 functions.")
+    logging.info("*"*50)
+
+    return df_master_new
+
+
+if __name__ == '__main__':
+    # Create the directory if it doesn't exist
+    if not os.path.exists(ADD_DATA_DIR):
+        os.makedirs(ADD_DATA_DIR)
+        logging.warning(f"Directory '{ADD_DATA_DIR}' not found and created. Please place your JSON files inside.")
+
+    df_final = create_master_data()
+    
+    if df_final is not None:
+        print(f"\n--- Tail of {MASTER_FILE_PATH_NEW} (Showing the 8 newly appended rows) ---")
+        # Display the key columns to confirm structure and padding
+        # Filter for the newest round (Round 8)
+        print(df_final[df_final['Round'] == CURRENT_ROUND][['Function ID', 'Round', 'X1', 'X2', 'X3', 'X4', 'X5', 'X6', 'Y']])
+```
+
+    INFO: **************************************************
+    INFO: --- Starting BBO Master File Creation for Round 8 ---
+    INFO: Loaded 136 rows from bbo_master_w08.csv.
+    INFO: FIX APPLIED: 'Round' column corrected (R0 to R7).
+    INFO: Successfully loaded week08_clean_inputs.json.
+    INFO: Successfully loaded week08_clean_outputs.json.
+    INFO: Successfully constructed 8 new rows (Round 8).
+    INFO: 
+    **************************************************
+    INFO: SUCCESS: New master data file 'bbo_master_w09.csv' created.
+    INFO: Total rows in the new file: 144 (Expected 144).
+    INFO: Verification: There are now 18 data points (Rounds 0-8) for each of the 8 functions.
+    INFO: **************************************************
+    
+    --- Tail of bbo_master_w09.csv (Showing the 8 newly appended rows) ---
+         Function ID  Round        X1        X2        X3        X4        X5  \
+    136            1      8  0.662067  0.479480       NaN       NaN       NaN   
+    137            2      8  0.769782  1.000000       NaN       NaN       NaN   
+    138            3      8  0.664275  0.600999  0.535155       NaN       NaN   
+    139            4      8  0.428378  0.369407  0.345557  0.399058       NaN   
+    140            5      8  1.000000  1.000000  1.000000  1.000000       NaN   
+    141            6      8  0.510625  0.330550  0.518944  0.771190  0.154218   
+    142            7      8  0.967968  0.468373  0.152233  0.998512  0.040256   
+    143            8      8  0.128465  0.244099  0.000000  0.310018  0.535545   
+    
+               X6             Y  
+    136       NaN  2.602152e-17  
+    137       NaN  2.912743e-01  
+    138       NaN -1.220611e-02  
+    139       NaN  4.940159e-01  
+    140       NaN  8.662405e+03  
+    141       NaN -2.554849e-01  
+    142  0.912553  8.473264e-04  
+    143  0.241708  9.756478e+00  
+
+
+
+```python
+
+```
+
+
+```python
+
+```

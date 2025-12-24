@@ -1,0 +1,369 @@
+```python
+import pandas as pd
+import numpy as np
+from scipy.stats import norm
+from scipy.optimize import minimize
+import logging
+import warnings
+import json
+from typing import List, Tuple, Dict, Any
+
+# Import necessary components from scikit-learn for GPR
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C, WhiteKernel
+from sklearn.preprocessing import StandardScaler
+from sklearn.exceptions import ConvergenceWarning
+```
+
+
+```python
+# Suppress Convergence Warnings from optimiser for cleaner output
+warnings.filterwarnings("ignore", category=ConvergenceWarning)
+
+# Set up logging for clearer feedback
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+# --- Configuration for Aggressive Exploration Phase (Week 5) ---
+DATA_FILE_PATH = 'bbo_master_w05.csv'  # Updated for Week 5 data
+OUTPUT_INPUTS_FILE = 'add_data/week05_clean_inputs.json'
+MAX_ITERATIONS = 50  # Optimisation iterations for finding the next best point
+N_SAMPLES = 10000  # Samples for Acquisition Function optimisation
+
+# Define the search space boundaries (always 0 to 1 for all dimensions)
+BOUNDS = [(0.0, 1.0)] * 8
+
+WEEK_DIMENSIONS = {
+    1: 2, 2: 2, 3: 3, 4: 4,
+    5: 4, 6: 5, 7: 6, 8: 8
+}
+
+```
+
+
+```python
+# --- Core Bayesian Optimisation Functions ---
+
+def load_and_preprocess_data(file_path: str, func_id: int) -> Tuple[np.ndarray, np.ndarray, StandardScaler, StandardScaler, int]:
+    """
+    Loads and filters data for a specific function ID, strictly enforcing the 
+    user-confirmed fixed dimension (d_fixed).
+    
+    Returns: X_scaled, Y_scaled, scaler_x, scaler_y, d_fixed (5 items)
+    """
+    df = pd.read_csv(file_path)
+    df_func = df[df['Function ID'] == func_id].copy()
+    
+    # Use the definitive fixed dimension for this function
+    d_fixed = WEEK_DIMENSIONS.get(func_id, 8) 
+    
+    # 1. Prepare data for the GPR (only using columns up to d_fixed)
+    X_cols = [f'X{i}' for i in range(1, d_fixed + 1)]
+    X = df_func[X_cols].values
+    Y = df_func['Y'].values
+    
+    # Filter out any rows that still contain NaNs in the required X columns
+    valid_indices = ~np.isnan(X).any(axis=1)
+    X = X[valid_indices]
+    Y = Y[valid_indices]
+    
+    if len(Y) == 0:
+        raise ValueError(f"No valid data points found for Function ID {func_id} after enforcing D={d_fixed}.")
+
+    # --- Preprocessing ---
+    
+    # 1. Scale X data (critical for GPR)
+    scaler_x = StandardScaler()
+    X_scaled = scaler_x.fit_transform(X) 
+    
+    # 2. Scale Y data (critical for GPR)
+    scaler_y = StandardScaler()
+    Y_scaled = scaler_y.fit_transform(Y.reshape(-1, 1)).flatten()
+    
+    logging.info(f"Loaded {len(X)} points for F{func_id}. Fixed Dimension D={d_fixed} enforced.")
+    
+    # Returns d_fixed as the dimension for consistency in the optimization loop
+    return X_scaled, Y_scaled, scaler_x, scaler_y, d_fixed
+
+```
+
+
+```python
+def build_gpr_model(X: np.ndarray, Y: np.ndarray) -> GaussianProcessRegressor:
+    """Builds and trains the Gaussian Process Regressor with a refined kernel."""
+    
+    D = X.shape[1]
+    # Determine initial length scale based on the number of dimensions
+    initial_length_scale = np.sqrt(D) 
+    
+    # Use the appropriate kernel structure for the D dimension
+    kernel = (
+        C(1.0, (1e-3, 1e3)) * RBF(
+            length_scale=[initial_length_scale] * D,
+            length_scale_bounds=(1e-5, 1e5)
+        )
+        + WhiteKernel(
+            noise_level=1e-5, 
+            noise_level_bounds=(1e-10, 1e-1)
+        )
+    )
+    
+    gpr = GaussianProcessRegressor(
+        kernel=kernel, 
+        alpha=0.0,
+        n_restarts_optimizer=20, 
+        normalize_y=False
+    )
+    
+    gpr.fit(X, Y)
+    logging.info(f"GPR Model Trained. Log-Marginal-Likelihood: {gpr.log_marginal_likelihood(gpr.kernel_.theta)}")
+    return gpr
+```
+
+
+```python
+def expected_improvement(X_candidate_scaled: np.ndarray, gpr: GaussianProcessRegressor, max_y: float) -> np.ndarray:
+    """Calculates the Expected Improvement (EI) acquisition function for MAXIMISATION."""
+    
+    # Predict mean and standard deviation
+    mu, sigma = gpr.predict(X_candidate_scaled.reshape(1, -1), return_std=True)
+    
+    mu = mu[0]
+    sigma = sigma[0]
+    
+    if sigma <= 1e-10:
+        return 0.0
+    
+    # Calculate Z-score for MAXIMISATION
+    Z = (mu - max_y) / sigma
+    
+    # Calculate EI
+    ei = sigma * (Z * norm.cdf(Z) + norm.pdf(Z))
+    return ei
+```
+
+
+```python
+def propose_next_point(gpr: GaussianProcessRegressor, func_id: int, d: int, scaler_x: StandardScaler, scaler_y: StandardScaler) -> List[float]:
+    """Optimizes the acquisition function (EI) to find the next query point."""
+    
+    # Optimization bounds are restricted to the current function dimension (d)
+    local_bounds = BOUNDS[:d]
+    
+    # 1. Calculate the best known MAXIMUM (Y_max) in the SCALED space
+    df_data = pd.read_csv(DATA_FILE_PATH)
+    # Filter by func_id
+    df_func = df_data[df_data['Function ID'] == func_id].copy() 
+    Y = df_func['Y'].values
+    
+    # Recalculate scaled Y using the provided scaler_y (already fitted in load_and_preprocess_data)
+    Y_scaled = scaler_y.transform(Y.reshape(-1, 1)).flatten()
+    best_known_scaled = np.max(Y_scaled)
+    
+    logging.info(f"Best known MAXIMUM (Scaled Y) for F{func_id}: {best_known_scaled:.4f}")
+
+    # Objective function to MAXIMIZE EI (so we minimize -EI)
+    def objective_function(x):
+        # Scale the candidate point (x) using the provided scaler_x
+        # x is already size d, and scaler_x was fitted on size d
+        x_scaled = scaler_x.transform(x.reshape(1, -1)) 
+        
+        # The objective is to maximize EI, so we return -EI
+        ei_value = expected_improvement(x_scaled, gpr, best_known_scaled)
+        
+        # Ensure we always return a float
+        return -ei_value if isinstance(ei_value, (int, float, np.float64)) else -1e-10
+
+    # 2. Optimization Phase: Use multi-start optimization
+    
+    # a. Randomly sample N_SAMPLES points in the search space [0, 1]
+    X_samples = np.random.uniform(local_bounds[0][0], local_bounds[0][1], 
+                                  size=(N_SAMPLES, d))
+    
+    # b. Find the point with the highest EI among samples (good starting point)
+    X_samples_scaled = scaler_x.transform(X_samples)
+
+    # Calculate EI for all samples
+    ei_values = np.array([
+        expected_improvement(X_samples_scaled[i], gpr, best_known_scaled) 
+        for i in range(N_SAMPLES)
+    ])
+    
+    # Initialize with the best sampled point
+    best_sample_index = np.argmax(ei_values)
+    best_ei = ei_values[best_sample_index]
+    best_x = X_samples[best_sample_index]
+    
+    # c. Run local optimization from the best sample point
+    
+    for i in range(MAX_ITERATIONS):
+        # Use random start point, or the best sampled point for the first run
+        x0 = best_x if i == 0 else np.random.uniform(local_bounds[0][0], local_bounds[0][1], size=d)
+        
+        if not isinstance(x0, np.ndarray):
+             x0 = np.array(x0, dtype=float)
+
+        res = minimize(
+            fun=objective_function,
+            x0=x0,
+            bounds=local_bounds,
+            method='L-BFGS-B' 
+        )
+
+        # Check for successful optimization and a valid objective function result
+        if res.success and res.fun is not None:
+            current_ei = -res.fun
+            # Check for improvement
+            if current_ei > best_ei and not np.isclose(current_ei, best_ei):
+                best_ei = current_ei
+                best_x = res.x
+            
+    logging.info(f"Optimal EI found: {best_ei:.4f}")
+    
+    # Round the final proposal to 6 decimal places for submission
+    return np.round(best_x, 6).tolist()
+
+```
+
+
+```python
+def run_optimisation():
+    """Main loop to run BO for all 8 functions and generate the output JSON file."""
+    
+    all_inputs = []
+
+    # Iterate through all 8 functions (F1 to F8)
+    for func_id in range(1, 9):
+        logging.info(f"\n--- Processing Function F{func_id} ---")
+        
+        current_d = WEEK_DIMENSIONS[func_id] # Use the fixed dimension
+        
+        try:
+            # 1. Load Data
+            # X_scaled will have the shape (N, D), where D=current_d
+            X_scaled, Y_scaled, scaler_x, scaler_y, d = load_and_preprocess_data(DATA_FILE_PATH, func_id)
+            
+            # 2. Train GPR Model
+            # The GPR is correctly trained on the full D dimension
+            gpr = build_gpr_model(X_scaled, Y_scaled)
+
+            # 3. Propose Next Point
+            # Propose the point across the full D-dimensional space
+            next_x_point = propose_next_point(gpr, func_id, d, scaler_x, scaler_y)
+
+            # 4. Format Input
+            # Pad to 8D for consistency in internal logging/arrays, but this is discarded in final JSON
+            full_input = next_x_point + [0.0] * (8 - d)
+            all_inputs.append(full_input)
+            
+            logging.info(f"F{func_id} Proposed Query (D={d}): {next_x_point}")
+
+        except Exception as e:
+            # Fallback uses the fixed dimension
+            logging.error(f"An error occurred while processing F{func_id}: {e}")
+            
+            default_x = [0.5] * current_d
+            # Pad to 8D for consistency
+            full_input = default_x + [0.0] * (8 - current_d)
+            all_inputs.append(full_input)
+            logging.warning(f"F{func_id} failed. Inserting safe default (D={current_d}): {default_x}")
+
+
+    # --- Final Output ---
+    logging.info("\nINFO: ----------------------------------")
+    logging.info("INFO: Saving Week 5 inputs to JSON...")
+    
+    # Clean up the output to match the required format (list of lists, trimmed to fixed D)
+    cleaned_inputs = []
+    for i, row in enumerate(all_inputs, start=1):
+        # Use the standard, fixed dimension for the final output JSON submission
+        expected_d = WEEK_DIMENSIONS[i]
+        cleaned_inputs.append(row[:expected_d])
+        
+    try:
+        with open(OUTPUT_INPUTS_FILE, 'w') as f:
+            # Save as a pretty-printed JSON list
+            json.dump(cleaned_inputs, f, indent=2)
+            
+        logging.info(f"INFO: Successfully generated 8 new query points in '{OUTPUT_INPUTS_FILE}'.")
+    except Exception as e:
+        logging.error(f"Failed to write output JSON file: {e}")
+
+    logging.info("INFO: Review the generated points and submit the JSON file.")
+    logging.info("INFO: ----------------------------------")
+
+```
+
+
+```python
+if __name__ == '__main__':
+    run_optimisation()
+```
+
+    INFO: 
+    --- Processing Function F1 ---
+    INFO: Loaded 14 points for F1. Fixed Dimension D=2 enforced.
+    INFO: GPR Model Trained. Log-Marginal-Likelihood: -19.86513946486542
+    INFO: Best known MAXIMUM (Scaled Y) for F1: 3.3378
+    INFO: Optimal EI found: 0.0001
+    INFO: F1 Proposed Query (D=2): [0.598193, 0.70091]
+    INFO: 
+    --- Processing Function F2 ---
+    INFO: Loaded 14 points for F2. Fixed Dimension D=2 enforced.
+    INFO: GPR Model Trained. Log-Marginal-Likelihood: -13.394454114593238
+    INFO: Best known MAXIMUM (Scaled Y) for F2: 1.6852
+    INFO: Optimal EI found: 0.0267
+    INFO: F2 Proposed Query (D=2): [0.208622, 0.315491]
+    INFO: 
+    --- Processing Function F3 ---
+    INFO: Loaded 14 points for F3. Fixed Dimension D=3 enforced.
+    INFO: GPR Model Trained. Log-Marginal-Likelihood: -13.913514219752603
+    INFO: Best known MAXIMUM (Scaled Y) for F3: 1.1389
+    INFO: Optimal EI found: 0.1750
+    INFO: F3 Proposed Query (D=3): [0.573329, 0.0, 0.32048]
+    INFO: 
+    --- Processing Function F4 ---
+    INFO: Loaded 14 points for F4. Fixed Dimension D=4 enforced.
+    INFO: GPR Model Trained. Log-Marginal-Likelihood: -16.547441869929056
+    INFO: Best known MAXIMUM (Scaled Y) for F4: 2.0936
+    INFO: Optimal EI found: 0.1862
+    INFO: F4 Proposed Query (D=4): [0.406574, 0.220158, 0.268444, 0.246611]
+    INFO: 
+    --- Processing Function F5 ---
+    INFO: Loaded 14 points for F5. Fixed Dimension D=4 enforced.
+    INFO: GPR Model Trained. Log-Marginal-Likelihood: -5.965647677133552
+    INFO: Best known MAXIMUM (Scaled Y) for F5: 3.4899
+    INFO: Optimal EI found: 0.0372
+    INFO: F5 Proposed Query (D=4): [0.0, 1.0, 1.0, 0.0]
+    INFO: 
+    --- Processing Function F6 ---
+    INFO: Loaded 14 points for F6. Fixed Dimension D=5 enforced.
+    INFO: GPR Model Trained. Log-Marginal-Likelihood: -14.373475757680232
+    INFO: Best known MAXIMUM (Scaled Y) for F6: 1.1790
+    INFO: Optimal EI found: 0.5274
+    INFO: F6 Proposed Query (D=5): [0.783269, 0.227788, 1.0, 0.716222, 0.55527]
+    INFO: 
+    --- Processing Function F7 ---
+    INFO: Loaded 14 points for F7. Fixed Dimension D=6 enforced.
+    INFO: GPR Model Trained. Log-Marginal-Likelihood: -19.78396787015608
+    INFO: Best known MAXIMUM (Scaled Y) for F7: 2.4971
+    INFO: Optimal EI found: 0.0755
+    INFO: F7 Proposed Query (D=6): [0.554175, 0.604649, 0.1292, 0.611107, 0.485766, 0.840383]
+    INFO: 
+    --- Processing Function F8 ---
+    INFO: Loaded 14 points for F8. Fixed Dimension D=8 enforced.
+    INFO: GPR Model Trained. Log-Marginal-Likelihood: -14.729149791165895
+    INFO: Best known MAXIMUM (Scaled Y) for F8: 1.5482
+    INFO: Optimal EI found: 0.2170
+    INFO: F8 Proposed Query (D=8): [0.0, 0.804574, 0.266611, 0.136686, 0.656434, 0.355551, 0.0, 0.674748]
+    INFO: 
+    INFO: ----------------------------------
+    INFO: INFO: Saving Week 5 inputs to JSON...
+    INFO: INFO: Successfully generated 8 new query points in 'add_data/week05_clean_inputs.json'.
+    INFO: INFO: Review the generated points and submit the JSON file.
+    INFO: INFO: ----------------------------------
+
+
+
+```python
+
+```
