@@ -224,4 +224,4 @@ dependencies:
   - zlib-ng=2.2.5=h3470cca_0
   - zstandard=0.25.0=py310hf151d32_1
   - zstd=1.5.7=h6491c7d_2
-prefix: /Users/larry/Applications/miniforge3/envs/jenv
+
