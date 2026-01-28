@@ -24,7 +24,6 @@ The optimisation strategy evolved iteratively over 10 weeks to balance **Explora
 *   **Surrogate Model:** Gaussian Process Regressor (GPR).
 *   **Acquisition Function:** Expected Improvement (EI) was the primary driver, with Adaptive UCB used in early rounds [6].
 *   **Optimisation Method:** L-BFGS-B with random restarts (10–50 restarts) to escape local optima in the acquisition surface.
-*   Final Policy: **Finite Horizon Experience Replay.** In the final round, predictive modelling was suspended in favour of a deterministic lookup of historical bests to minimise model variance.
 
 ### Strategy Evolution Log
 | Phase | Weeks | Strategy Description | Rationale |
@@ -43,22 +42,11 @@ Performance is measured by the **cumulative maximum $Y$** found for each functio
 *   **Key Results (Snapshots from Week 8/9 Logs):**
     *   **High Performance:** Function 5 (4D) achieved high-magnitude results, jumping from $Y \approx 1,645$ (Round 7) to $Y \approx 8,662$ (Round 8) after the strategy correctly exploited the upper boundary of the hypercube ([1.0, 1.0, 1.0, 1.0]).
     *   **High-Dimensional Challenge:** Function 8 (8D) proved difficult due to the "Curse of Dimensionality." With only ~19 points covering an 8-dimensional volume, the search space remains largely unexplored.
-    | Function | Final Score (Week 13) | Historical Best (Y_max) | Status | Insight |
-| :--- | :--- | :--- | :--- | :--- |
-| **F1** | **0.1744** | 0.1744 | **Stable** | Converged to global maximum. |
-| **F2** | 0.5453 | **0.7282** | Regression | High variance in local region. |
-| **F3** | -0.0264 | **-0.0122** | Stable | Difficult landscape, low signal. |
-| **F4** | **0.4940** | 0.4940 | **Stable** | Successfully identified peak. |
-| **F5** | **8662.41** | 8662.41 | **Solved** | Deterministic plateau found. |
-| **F6** | -0.2599 | **-0.2555** | Stable | Noise limited precision. |
-| **F7** | 0.1114 | **1.6487** | Regression | Significant shift in optimal location or high noise. |
-| **F8** | 3.6415 | **9.9951** | **High Variance** | The "Experience Replay" of the best coordinates failed to reproduce the outlier score, confirming F8 is highly stochastic. |
 
 ## 5. Assumptions and Limitations
 *   **Assumption of Noise:** The model assumes the target functions contain **aleatoric (observational) noise**. This hypothesis was confirmed when the model stability improved after introducing the `WhiteKernel` in Week 5.
 *   **Boundary Constraints:** The model strictly enforces bounds of $[0.0, 0.999999]$. Values outside this range are invalid and truncated.
 *   **Sparsity Limitation:** With only ~19 data points, the model's posterior variance in high-dimensional spaces (6D, 8D) remains significant. The global maximum for F6, F7, and F8 likely resides in unobserved regions.
-*   **Stochasticity:** The model assumes a deterministic objective f(x). However, re-sampling Function 8 in Week 13 revealed significant output variance (9.99 -> 3.64), suggesting the underlying function simulates a noisy process or LLM temperature variability that the standard GP struggled to pin down.
 
 ## 6. Ethical Considerations and Transparency
 *   **Reproducibility:** A **Datasheet** documenting the data collection process is available [here](./DATASHEET.md).
