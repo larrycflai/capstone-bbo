@@ -57,4 +57,4 @@ The project relies on the standard Python Data Science stack:
 
 ## Contact
 **Project Author:** Larry Lai
-*This project was completed as part of the Imperial College Business School ML/AI Professional Certificate.*
+*This project was completed as part of the Imperial College London ML/AI Professional Certificate.*
